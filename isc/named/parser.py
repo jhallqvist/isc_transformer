@@ -44,9 +44,6 @@ class Node:
     """Base class for all AST nodes."""
     span: Span
 
-    def accept(self, visitor: Visitor) -> Any:
-        raise NotImplementedError
-
 
 @dataclass(frozen=True)
 class Block(Node):
@@ -58,9 +55,6 @@ class Block(Node):
     Appears inside Statement.values, or as the inner of a Negated node.
     """
     body: tuple[Statement | Negated, ...]
-
-    def accept(self, visitor: Visitor) -> Any:
-        return visitor.visit_block(self)
 
     def __repr__(self) -> str:
         body = ", ".join(repr(s) for s in self.body)
@@ -87,16 +81,6 @@ class Statement(Node):
     """
     values: tuple[Token | Block, ...]
 
-    @property
-    def keyword(self):
-        first_token = self.values[0]
-        if isinstance(first_token, Word):
-            return first_token.value
-        return None
-
-    def accept(self, visitor: Visitor) -> Any:
-        return visitor.visit_statement(self)
-
     def __repr__(self) -> str:
         vals = ", ".join(repr(v) for v in self.values)
         return f"Statement([{vals}])"
@@ -112,9 +96,6 @@ class Negated(Node):
     """
     inner: Statement | Block
 
-    def accept(self, visitor: Visitor) -> Any:
-        return visitor.visit_negated(self)
-
     def __repr__(self) -> str:
         return f"Negated({self.inner!r})"
 
@@ -123,9 +104,6 @@ class Negated(Node):
 class Conf(Node):
     """Root node of a parsed named.conf file."""
     body: tuple[Statement | Negated, ...]
-
-    def accept(self, visitor: Visitor) -> Any:
-        return visitor.visit_conf(self)
 
     def __repr__(self) -> str:
         stmts = "\n  ".join(repr(s) for s in self.body)
