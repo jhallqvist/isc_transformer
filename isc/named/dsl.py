@@ -1,33 +1,48 @@
+"""
+isc.named.dsl
+~~~~~~~~~~~~~
+DSL types for describing the ISC named.conf schema.
+
+Two categories:
+
+  Types       — describe what kind of value is expected at a position.
+                Pure descriptors, no logic.
+
+  Directives  — instruct the visitor how to handle Args or Statements.
+                Pure descriptors, no logic.
+
+Convention
+----------
+  - Absence of Optional means required.
+  - Absence of Multiple means unique (may appear only once in its context).
+  - ListOf implies one or more — Multiple and Variadic are not needed inside it.
+  - Block is the parser AST node type. ListOf and Context are the DSL
+    constructs that describe what to do with a brace-enclosed body.
+"""
+
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
+
 # ---------------------------------------------------------------------------
-# Types
-# Describe what kind of value is expected at a given position.
-# No logic — pure descriptors consumed by the visitor.
+# Value types
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class IpAddressType:
     """A single IPv4 or IPv6 address."""
 
+
 @dataclass(frozen=True)
 class IpPrefixType:
-    """An IPv4 or IPv6 subnet in CIDR notation."""
+    """An IPv4 or IPv6 subnet in CIDR notation e.g. 10.0.0.0/8."""
+
 
 @dataclass(frozen=True)
 class BooleanType:
     """An ISC boolean: yes/no, true/false or 1/0."""
 
-@dataclass(frozen=True)
-class Duration:
-    """
-    An ISC duration. Accepts all three formats:
-      - plain integer (seconds)
-      - TTL shorthand: 1W, 3d12h
-      - ISO 8601: P3M10D, pt15m, P (zero)
-    """
 
 @dataclass(frozen=True)
 class Integer:
@@ -35,14 +50,16 @@ class Integer:
     min: int | None = None
     max: int | None = None
 
+
 @dataclass(frozen=True)
 class FixedPoint:
     """
-    An ISC fixed point value: one to five digits followed by
-    '.' and exactly two digits. e.g. 1.50, 100.00
+    An ISC fixed point value: one to five digits followed by '.' and
+    exactly two digits. e.g. 1.50, 100.00
     """
     min: float | None = None
     max: float | None = None
+
 
 @dataclass(frozen=True)
 class Percentage:
@@ -50,73 +67,124 @@ class Percentage:
     min: int | None = None
     max: int | None = None
 
+
 @dataclass(frozen=True)
 class Size:
-    """A numeric string followed by k, m or g."""
+    """
+    A numeric string followed by k, m or g representing
+    kilobytes, megabytes or gigabytes respectively.
+    Constraints are in bytes after suffix expansion.
+    """
     min: int | None = None
     max: int | None = None
+
 
 @dataclass(frozen=True)
 class StringType:
     """A quoted or bare string value."""
+
 
 @dataclass(frozen=True)
 class EnumType:
     """One of a fixed set of bare word values."""
     values: tuple[str, ...]
 
-@dataclass(frozen=True)
-class TsigAlgorithm:
-    """
-    An ISC TSIG algorithm name with optional truncation suffix.
-    Base algorithms: hmac-md5, hmac-sha1, hmac-sha224, hmac-sha256,
-                     hmac-sha384, hmac-sha512, gss-tsig.
-    Truncation suffix: -<integer> appended to the algorithm name.
-    e.g. hmac-sha256-80, hmac-sha512-128.
-    Truncation is not valid for hmac-md5 or gss-tsig.
-    """
+    def __init__(self, *values: str) -> None:
+        object.__setattr__(self, "values", values)
+
 
 @dataclass(frozen=True)
-class Base64:
+class Duration:
     """
-    A quoted string whose value must be valid Base64.
-    Padding with '=' is accepted. Whitespace within the
-    encoded string is ignored per ISC convention.
+    An ISC duration. Always accepts all three formats:
+      - plain integer (seconds)
+      - TTL shorthand: 1W, 3d12h (case-insensitive)
+      - ISO 8601:      P3M10D, pt15m, P (zero) (case-insensitive)
     """
+
 
 @dataclass(frozen=True)
 class RrTypeList:
     """
     A DNS resource record type list.
-    Accepts ANY, a single RR type, or a space-separated list of RR types.
+    Accepts ANY, a single RR type name, or a space-separated list.
     """
+
+
+@dataclass(frozen=True)
+class TsigAlgorithm:
+    """
+    An ISC TSIG algorithm name with optional truncation suffix.
+    Base algorithms:
+        hmac-md5, hmac-sha1, hmac-sha224, hmac-sha256,
+        hmac-sha384, hmac-sha512, gss-tsig
+    Truncation suffix: -<integer> appended to the base name.
+        e.g. hmac-sha256-80, hmac-sha512-128
+    Truncation is not valid for hmac-md5 or gss-tsig.
+    Coerces to (base_algorithm: str, truncation: int | None).
+    """
+
+
+@dataclass(frozen=True)
+class Base64:
+    """
+    A quoted string whose content must be valid Base64.
+    Padding with '=' is accepted.
+    Whitespace within the encoded string is ignored per ISC convention.
+    """
+
+
+@dataclass(frozen=True)
+class Unlimited:
+    """
+    The bare word 'unlimited' used in place of a numeric value.
+    Coerces to None to signal no limit.
+    """
+
 
 # ---------------------------------------------------------------------------
 # Reference types
-# Carry the kind of definition they refer to.
 # Resolved in the visitor's reconciliation step after the full tree is walked.
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class AclReference:
-    """A reference to a defined acl statement."""
+    """
+    A reference to a defined acl statement.
+    Coerces to str. Registered for cross-reference resolution.
+    """
+
 
 @dataclass(frozen=True)
 class KeyReference:
-    """A reference to a defined key statement."""
+    """
+    A reference to a defined key statement.
+    Accepts two forms depending on context:
+      - Statement form:  key "name";   (in address match lists)
+      - Bare name form:  "name";       (in keys { } blocks)
+    The visitor distinguishes the two from the AST node type received.
+    Coerces to str. Registered for cross-reference resolution.
+    """
+
 
 @dataclass(frozen=True)
 class TlsReference:
-    """A reference to a defined tls statement."""
+    """
+    A reference to a defined tls statement.
+    Coerces to str. Registered for cross-reference resolution.
+    """
+
 
 @dataclass(frozen=True)
 class ViewReference:
-    """A reference to a defined view statement."""
+    """
+    A reference to a defined view statement.
+    Coerces to str. Registered for cross-reference resolution.
+    """
+
 
 # ---------------------------------------------------------------------------
 # Directives
-# Instruct the visitor how to handle Args or Statements.
-# No logic — pure descriptors consumed by the visitor.
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -124,8 +192,9 @@ class Arg:
     """
     A single named parameter slot accepting one or more types.
 
-    name    the attribute name on the target dataclass, and the keyword
-            sentinel when wrapped in Keyword.
+    name    doubles as:
+              - the attribute name on the target dataclass
+              - the keyword sentinel when this Arg is wrapped in Keyword
     types   one or more type descriptors tried in order until one matches.
             A single type is the common case. Multiple types express a
             union of acceptable values at this position.
@@ -137,6 +206,7 @@ class Arg:
         object.__setattr__(self, "name",  name)
         object.__setattr__(self, "types", types)
 
+
 @dataclass(frozen=True)
 class Keyword:
     """
@@ -146,132 +216,155 @@ class Keyword:
     """
     inner: Any   # Arg or Optional(Arg)
 
+
 @dataclass(frozen=True)
 class Optional:
     """
-    Marks an Arg or Keyword as optional.
+    Marks an Arg or Keyword as optional at the statement param level.
     If absent the visitor resolves the Arg.name to None without error.
+    Not needed inside Context — statement presence is always implicit there.
     """
     inner: Any
+
 
 @dataclass(frozen=True)
 class Negatable:
     """
     Marks that the inner element may be preceded by '!' in the source.
     Without this wrapper a Negated AST node at this position is an error.
-    The resolved typed node carries negation as a boolean on the dataclass.
+    The resolved typed node carries negation as a boolean attribute.
     """
     inner: Any
+
 
 @dataclass(frozen=True)
 class Wildcard:
     """
-    When the token value is '*' matches without coercing through the inner
-    type, resolving to a sentinel value the visitor substitutes instead.
+    When the token value is '*' resolves to a sentinel value (None by
+    default) without coercing through the inner type.
     Otherwise the inner Arg type is used normally.
     """
     inner: Any
+
 
 @dataclass(frozen=True)
 class Deprecated:
     """
     Marks a Statement as deprecated.
-    The visitor registers a warning but does not raise an error.
+    The visitor registers a WARNING but does not raise an error.
     Processing continues normally through the inner statement.
     """
     inner: Any
 
+
 @dataclass(frozen=True)
 class Multiple:
     """
-    Allows one or more occurrences of the inner Statement within its context.
-    Uniqueness is the default assumption — Multiple is the explicit exception.
+    Allows one or more occurrences of the inner Statement within its
+    context. Uniqueness is the default assumption — Multiple is the
+    explicit exception declared at the context level, not on the
+    StatementDef itself so the same definition can be reused with
+    different cardinality in different contexts.
     """
     inner: Any
+
 
 @dataclass(frozen=True)
 class OneOf:
     """
-    Value-level union. Used inside Arg.types to express that a single
-    token position accepts multiple possible types. The visitor tries
-    each option in order and uses the first that coerces successfully.
+    Tries each option in order and uses the first that matches.
+
+    At the value level (inside Arg.types or ListOf):
+        tries each type descriptor until one coerces successfully.
+
+    At the statement level (inside ListOf):
+        matches the current keyword against each StatementDef and
+        dispatches to the first that matches.
+
+    The meaning — exactly one of these options applies — is consistent
+    regardless of where OneOf appears. The visitor determines the
+    appropriate resolution strategy from what the options contain.
     """
     options: tuple[Any, ...]
 
     def __init__(self, *options: Any) -> None:
         object.__setattr__(self, "options", options)
+
 
 @dataclass(frozen=True)
 class ExclusiveOf:
     """
-    Statement-level mutual exclusion. Used inside Context to express
-    that exactly one of the given StatementDefs may appear in the body.
-    The visitor enforces that only one is present and emits an error
-    if a second one is encountered.
+    Exactly one of the given StatementDefs may appear in the enclosing
+    Context body. The visitor matches the keyword against each option
+    and emits an error if a second matching statement is encountered.
+    Used for mutually exclusive alternatives like logging destinations.
     """
     options: tuple[Any, ...]
 
     def __init__(self, *options: Any) -> None:
         object.__setattr__(self, "options", options)
 
-@dataclass(frozen=True)
-class AnyOrder:
-    """
-    A set of keyword/value args that may appear in any order.
-    Each inner element is matched by its keyword sentinel regardless
-    of position. All non-Optional elements must appear exactly once.
-    """
-    inner: tuple[Any, ...]
-
-    def __init__(self, *inner: Any) -> None:
-        object.__setattr__(self, "inner", inner)
 
 @dataclass(frozen=True)
 class Variadic:
     """
-    Consumes all remaining tokens of the inner type.
-    Must be the last element in its containing Block or param list.
-    Resolves to a list of coerced values.
+    Consumes all remaining tokens of the inner type into a list.
+    Must be the last element in its containing param list.
+    Use ListOf for brace-enclosed repetition — Variadic is for
+    inline token sequences without surrounding braces.
     """
     inner: Any
+
 
 @dataclass(frozen=True)
 class ListOf:
     """
-    Expects a brace-enclosed AST Block node.
-    Resolves to a homogeneous list — use for address match lists,
-    key lists and any other repeated value sequences.
+    Expects a brace-enclosed AST Block node and resolves its contents
+    into a homogeneous list. Implicitly allows one or more elements —
+    Multiple and Variadic are not needed inside ListOf.
+
+    inner       the type descriptor or StatementDef for each element.
+                OneOf can be used to allow multiple element shapes.
+    node_class  the dataclass to instantiate for each resolved element.
+                Use str or int for scalar element types.
     """
-    inner: Any
-    node_class: type
+    inner:      Any
+    node_class: type | None = None
+
 
 @dataclass(frozen=True)
 class Context:
     """
-    Expects a sequence of statements and resolves them as named attributes
-    on the target node_class dataclass.
+    Resolves a sequence of statements into named attributes on the
+    target node_class dataclass.
 
     Applies to two AST node types:
-      - Conf: the top level sequence of statements in a named.conf file.
-              No braces are present in the source — the sequence is implicit.
-      - Block: a brace-enclosed sequence of statements nested inside another
-               statement, e.g. options { }, zone { }, key { }.
+      - Conf:  the top-level sequence of statements in a named.conf file.
+               No braces are present — the sequence is implicit.
+      - Block: a brace-enclosed sequence of statements nested inside
+               another statement, e.g. options { }, zone { }, key { }.
 
-    The distinction between Conf and Block is a parser-level detail — from
-    the schema's perspective both are sequences of statements that resolve
-    to a typed dataclass. The visitor dispatches on the AST node type it
-    receives and extracts the body in either case.
+    The distinction between Conf and Block is a parser-level detail.
+    From the schema's perspective both are sequences of statements that
+    resolve to a typed dataclass. The visitor dispatches on the AST node
+    type it receives and extracts the body in either case.
 
-    Use Context when the result should be a structured dataclass with named
-    attributes. Use Block when the result should be a homogeneous list.
+    Statement presence within a Context is always implicit — Optional
+    is not needed here, only at the Arg level within a statement's params.
+    Uniqueness is the default — wrap a StatementDef in Multiple to allow
+    repeated occurrences.
+
+    Use Context when the result should be a structured dataclass with
+    named attributes. Use ListOf when the result should be a list.
     """
     statements: tuple[Any, ...]
 
     def __init__(self, *statements: Any) -> None:
         object.__setattr__(self, "statements", statements)
 
+
 # ---------------------------------------------------------------------------
-# Statement and schema definition
+# Statement definition
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -280,14 +373,22 @@ class StatementDef:
     Defines the shape of one named statement.
 
     keyword     the first token that identifies this statement
-    params      ordered sequence of Arg/Keyword/Optional/Block/Context slots
-    node_class  the typed dataclass to instantiate on successful validation
+    node_class  the typed dataclass to instantiate on successful validation.
+                None for statements that fold their contents into a parent
+                dataclass (e.g. controls folding into NamedConf.controls).
+    params      ordered sequence of Arg / Keyword / Optional / ListOf /
+                Context slots describing the statement's value sequence.
     """
     keyword:    str
+    node_class: type | None
     params:     tuple[Any, ...]
-    node_class: type
 
-    def __init__(self, keyword: str, node_class: type, *params: Any) -> None:
+    def __init__(
+        self,
+        keyword:    str,
+        node_class: type | None,
+        *params:    Any,
+    ) -> None:
         object.__setattr__(self, "keyword",    keyword)
         object.__setattr__(self, "node_class", node_class)
         object.__setattr__(self, "params",     params)
