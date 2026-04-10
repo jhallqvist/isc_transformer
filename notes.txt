@@ -1,0 +1,27 @@
+# Types.
+# Acts on AST Node to validate against a matched rule
+Block: Instructs the visitor to expect a block AST node and consume the tokens within as the defined type or types given the Block.inner attribute. Returns a list and should be used as the value of an Arg in order to have a keyword with a list value to give to the dataclass
+IpAddress: A single IPv4 of IPv6 AddressMatch
+IpPrefix: A IPv4 or IPv6 Subnet/prefix
+KeyRef: A reference to a defined Server Key (key statement)
+AclRef: A reference to a defined Acl (acl statement)
+TlsRef: A reference to a defined Tls (tls statement)
+ViewRef: A reference to a defined View (view statement)
+Boolean: A ISC boolean which is a value of yes/no, true/false or 1/0
+Duration: A ISO8601 duration with needs to support contraints
+FixedPoint: A ISC fixed point which has the format of one to five digits followed by a "." and exactly two digits. Needs to support contraints
+Integer: A numeric string which need to support contraints
+Percentage: A numeric string followed by "%". Might need contraints
+Size: A numeric string followed by k, m or g. Needs to support contraints
+
+
+# Directives - for Arg Type
+# Instructs the visitor how to handle Args or Statements.
+Arg: Defines a name and a Type. The type is used to validate the token.value and the name is a mapping to a dataclass attribute as well as a possible keyword if wrapped in Keyword.
+Negatable: When wrapped around a statement allows but does not expect a negated AST Node.
+Wildcard: when wrapped around a Arg. First matches if token.value is "*" and if so runs the Arg type but with a value of 0 instead of the token.value.
+Optional: When wrapped around Arg or Keyword checks if value is present and if not fail gracefully without error or return the Arg.name with a None value
+Keyword: If wrapped around an Arg enforces the presence of Arg.name before the Arg Type
+Deprecated: When wrapped around a statement registers a warning that the statement is deprecated but does not raise a error
+Multiple: When wrapped around a statement it allows multiples of that statement within the context
+Context: Instructs the visitor to expect a Block AST node and the statements within are attributes to the expected dataclass
