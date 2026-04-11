@@ -49,7 +49,7 @@ CONTROLS_STMT = StatementDef(
     node_class=None,
     params=[
         Arg("controls", ListOf(
-            ExclusiveOf(INET_STMT, UNIX_STMT),
+            OneOf(INET_STMT, UNIX_STMT),
             node_class=None,
         )),
     ]

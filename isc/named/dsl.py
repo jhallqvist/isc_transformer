@@ -18,6 +18,9 @@ Convention
   - ListOf implies one or more — Multiple and Variadic are not needed inside it.
   - Block is the parser AST node type. ListOf and Context are the DSL
     constructs that describe what to do with a brace-enclosed body.
+  - node_class is intentionally absent from StatementDef and ListOf.
+    The mapping from grammar constructs to domain objects belongs in the
+    TransformationVisitor, not in the schema.
 """
 
 from __future__ import annotations
@@ -121,7 +124,7 @@ class TsigAlgorithm:
     Truncation suffix: -<integer> appended to the base name.
         e.g. hmac-sha256-80, hmac-sha512-128
     Truncation is not valid for hmac-md5 or gss-tsig.
-    Coerces to (base_algorithm: str, truncation: int | None).
+    Coerces to TsigAlgorithmValue(base, truncation).
     """
 
 
@@ -144,14 +147,15 @@ class Unlimited:
 
 # ---------------------------------------------------------------------------
 # Reference types
-# Resolved in the visitor's reconciliation step after the full tree is walked.
+# Coerced to named reference objects (AclRef, KeyRef etc) by the
+# SemanticVisitor. Resolved against definitions by the TransformationVisitor.
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class AclReference:
     """
     A reference to a defined acl statement.
-    Coerces to str. Registered for cross-reference resolution.
+    Coerces to AclRef(name).
     """
 
 
@@ -163,7 +167,7 @@ class KeyReference:
       - Statement form:  key "name";   (in address match lists)
       - Bare name form:  "name";       (in keys { } blocks)
     The visitor distinguishes the two from the AST node type received.
-    Coerces to str. Registered for cross-reference resolution.
+    Coerces to KeyRef(name).
     """
 
 
@@ -171,7 +175,7 @@ class KeyReference:
 class TlsReference:
     """
     A reference to a defined tls statement.
-    Coerces to str. Registered for cross-reference resolution.
+    Coerces to TlsRef(name).
     """
 
 
@@ -179,7 +183,7 @@ class TlsReference:
 class ViewReference:
     """
     A reference to a defined view statement.
-    Coerces to str. Registered for cross-reference resolution.
+    Coerces to ViewRef(name).
     """
 
 
@@ -193,7 +197,7 @@ class Arg:
     A single named parameter slot accepting one or more types.
 
     name    doubles as:
-              - the attribute name on the target dataclass
+              - the param name in ValidatedStatement.params
               - the keyword sentinel when this Arg is wrapped in Keyword
     types   one or more type descriptors tried in order until one matches.
             A single type is the common case. Multiple types express a
@@ -232,7 +236,7 @@ class Negatable:
     """
     Marks that the inner element may be preceded by '!' in the source.
     Without this wrapper a Negated AST node at this position is an error.
-    The resolved typed node carries negation as a boolean attribute.
+    The resolved ValidatedStatement carries negation as a boolean attribute.
     """
     inner: Any
 
@@ -240,9 +244,8 @@ class Negatable:
 @dataclass(frozen=True)
 class Wildcard:
     """
-    When the token value is '*' resolves to a sentinel value (None by
-    default) without coercing through the inner type.
-    Otherwise the inner Arg type is used normally.
+    When the token value is '*' resolves to None without coercing through
+    the inner type. Otherwise the inner Arg type is used normally.
     """
     inner: Any
 
@@ -262,11 +265,14 @@ class Multiple:
     """
     Allows one or more occurrences of the inner Statement within its
     context. Uniqueness is the default assumption — Multiple is the
-    explicit exception declared at the context level, not on the
-    StatementDef itself so the same definition can be reused with
-    different cardinality in different contexts.
+    explicit exception declared at the context level.
+
+    attr    optional override for the key name used when accumulating
+            multiple occurrences into ValidatedStatement.params.
+            Defaults to inner.keyword.replace('-', '_').
     """
     inner: Any
+    attr:  str | None = None
 
 
 @dataclass(frozen=True)
@@ -274,16 +280,12 @@ class OneOf:
     """
     Tries each option in order and uses the first that matches.
 
-    At the value level (inside Arg.types or ListOf):
+    At the value level (inside Arg.types):
         tries each type descriptor until one coerces successfully.
 
     At the statement level (inside ListOf):
         matches the current keyword against each StatementDef and
         dispatches to the first that matches.
-
-    The meaning — exactly one of these options applies — is consistent
-    regardless of where OneOf appears. The visitor determines the
-    appropriate resolution strategy from what the options contain.
     """
     options: tuple[Any, ...]
 
@@ -295,8 +297,7 @@ class OneOf:
 class ExclusiveOf:
     """
     Exactly one of the given StatementDefs may appear in the enclosing
-    Context body. The visitor matches the keyword against each option
-    and emits an error if a second matching statement is encountered.
+    Context body. The visitor emits an error if a second one is encountered.
     Used for mutually exclusive alternatives like logging destinations.
     """
     options: tuple[Any, ...]
@@ -320,42 +321,26 @@ class Variadic:
 class ListOf:
     """
     Expects a brace-enclosed AST Block node and resolves its contents
-    into a homogeneous list. Implicitly allows one or more elements —
-    Multiple and Variadic are not needed inside ListOf.
+    into a homogeneous list. Implicitly allows one or more elements.
 
-    inner       the type descriptor or StatementDef for each element.
-                OneOf can be used to allow multiple element shapes.
-    node_class  the dataclass to instantiate for each resolved element.
-                Use str or int for scalar element types.
+    inner   the type descriptor or StatementDef for each element.
+            OneOf can be used to allow multiple element shapes.
     """
-    inner:      Any
-    node_class: type | None = None
+    inner: Any
 
 
 @dataclass(frozen=True)
 class Context:
     """
-    Resolves a sequence of statements into named attributes on the
-    target node_class dataclass.
+    Resolves a sequence of statements into a dict of named params.
 
     Applies to two AST node types:
       - Conf:  the top-level sequence of statements in a named.conf file.
-               No braces are present — the sequence is implicit.
       - Block: a brace-enclosed sequence of statements nested inside
                another statement, e.g. options { }, zone { }, key { }.
 
-    The distinction between Conf and Block is a parser-level detail.
-    From the schema's perspective both are sequences of statements that
-    resolve to a typed dataclass. The visitor dispatches on the AST node
-    type it receives and extracts the body in either case.
-
-    Statement presence within a Context is always implicit — Optional
-    is not needed here, only at the Arg level within a statement's params.
-    Uniqueness is the default — wrap a StatementDef in Multiple to allow
-    repeated occurrences.
-
-    Use Context when the result should be a structured dataclass with
-    named attributes. Use ListOf when the result should be a list.
+    Use Context when the result should be a structured set of named params.
+    Use ListOf when the result should be a homogeneous list.
     """
     statements: tuple[Any, ...]
 
@@ -372,23 +357,27 @@ class StatementDef:
     """
     Defines the shape of one named statement.
 
-    keyword     the first token that identifies this statement
-    node_class  the typed dataclass to instantiate on successful validation.
-                None for statements that fold their contents into a parent
-                dataclass (e.g. controls folding into NamedConf.controls).
-    params      ordered sequence of Arg / Keyword / Optional / ListOf /
-                Context slots describing the statement's value sequence.
+    keyword  the first token that identifies this statement.
+             Empty string means no keyword — all values are positional.
+    params   ordered sequence of Arg / Keyword / Optional / ListOf /
+             Context slots describing the statement's value sequence.
+    attr     optional override for the key name used when storing this
+             statement's result in a parent params dict.
+             Defaults to keyword.replace('-', '_').
+
+    Note: node_class is intentionally absent. The mapping from validated
+    statements to domain objects is the TransformationVisitor's job.
     """
-    keyword:    str
-    node_class: type | None
-    params:     tuple[Any, ...]
+    keyword: str
+    params:  tuple[Any, ...]
+    attr:    str | None = None
 
     def __init__(
         self,
-        keyword:    str,
-        node_class: type | None,
-        *params:    Any,
+        keyword: str,
+        *params: Any,
+        attr:    str | None = None,
     ) -> None:
-        object.__setattr__(self, "keyword",    keyword)
-        object.__setattr__(self, "node_class", node_class)
-        object.__setattr__(self, "params",     params)
+        object.__setattr__(self, "keyword", keyword)
+        object.__setattr__(self, "params",  params)
+        object.__setattr__(self, "attr",    attr)
