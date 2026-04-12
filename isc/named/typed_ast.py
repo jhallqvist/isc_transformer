@@ -235,6 +235,35 @@ class ValidatedStatement:
         matches = self.body_by_keyword(keyword)
         return matches[0] if matches else None
 
+    def body_value(self, keyword: str, param: str = "", default: Any = None) -> Any:
+        """
+        Return a param value from the first body statement matching keyword.
+
+        If param is empty, returns the first param's value.
+        This covers the common case where a context body statement has
+        exactly one meaningful param, e.g. StatementDef("recursion",
+        Arg("recursion", BooleanType())) — body_value("recursion") returns
+        the bool directly.
+        """
+        child = self.body_first(keyword)
+        if child is None:
+            return default
+        if param:
+            return child.param_value(param, default)
+        return child.params[0].value if child.params else default
+
+    def body_elements(self, keyword: str) -> list:
+        """
+        Return the 'elements' param from the first body statement matching
+        keyword, or an empty list. Covers all address-match list statements
+        which consistently use Arg('elements', ListOf(...)) in the schema.
+        """
+        child = self.body_first(keyword)
+        if child is None:
+            return []
+        v = child.param_value("elements", [])
+        return v if isinstance(v, list) else []
+
     def __repr__(self) -> str:
         params_r = ", ".join(repr(p) for p in self.params)
         body_r   = f", body=[{len(self.body)}]" if self.body else ""

@@ -107,12 +107,27 @@ _TTL_RE = re.compile(
 )
 _TTL_FACTORS = (604800, 86400, 3600, 60, 1)
 
-_ISO_RE = re.compile(
+# ISO 8601 durations come in two mutually exclusive forms:
+#
+#   Week form:    P<n>W              — weeks only, no other date units
+#   General form: P[nY][nM][nD][T[nH][nM][nS]]  — no W allowed
+#
+# The bare "P" (zero duration) is also valid per the ISC documentation.
+
+_ISO_WEEK_RE = re.compile(r'^[Pp](\d+)[Ww]$')
+
+_ISO_GENERAL_RE = re.compile(
     r'^[Pp]'
-    r'(?:(\d+)[Yy])?(?:(\d+)[Mm])?(?:(\d+)[Ww])?(?:(\d+)[Dd])?'
-    r'(?:[Tt](?:(\d+)[Hh])?(?:(\d+)[Mm])?(?:(\d+)[Ss])?)?$'
+    r'(?:(\d+)[Yy])?'
+    r'(?:(\d+)[Mm])?'
+    r'(?:(\d+)[Dd])?'
+    r'(?:[Tt]'
+    r'(?:(\d+)[Hh])?'
+    r'(?:(\d+)[Mm])?'
+    r'(?:(\d+)[Ss])?'
+    r')?$'
 )
-_ISO_FACTORS = (365 * 86400, 30 * 86400, 7 * 86400, 86400, 3600, 60, 1)
+_ISO_GENERAL_FACTORS = (365 * 86400, 30 * 86400, 86400, 3600, 60, 1)
 
 _TSIG_BASE = frozenset({
     "hmac-md5", "hmac-sha1",   "hmac-sha224",
@@ -132,12 +147,34 @@ def _parse_ttl(s: str) -> int | None:
 
 
 def _parse_iso8601(s: str) -> int | None:
-    if s.upper() == "P":
+    """
+    Parse an ISO 8601 duration string to seconds.
+
+    Valid forms:
+      P           — zero duration (ISC extension)
+      P<n>W       — weeks only; W cannot appear with Y, M, D or T units
+      P[nY][nM][nD][T[nH][nM][nS]]  — general form without W
+
+    Returns None if the string does not match any valid form.
+    """
+    upper = s.strip().upper()
+
+    if upper == "P":
         return 0
-    m = _ISO_RE.fullmatch(s.strip())
+
+    # Week form: PnW — no other units permitted
+    m = _ISO_WEEK_RE.fullmatch(s.strip())
+    if m:
+        return int(m.group(1)) * 7 * 86400
+
+    # General form: no W unit
+    m = _ISO_GENERAL_RE.fullmatch(s.strip())
     if not m:
         return None
-    return sum(int(g) * f for g, f in zip(m.groups(), _ISO_FACTORS) if g)
+    # Guard: at least one group must be present (bare "P" handled above)
+    if not any(m.groups()):
+        return None
+    return sum(int(g) * f for g, f in zip(m.groups(), _ISO_GENERAL_FACTORS) if g)
 
 
 # ---------------------------------------------------------------------------
@@ -203,35 +240,22 @@ class SemanticVisitor:
         schema: Context,
     ) -> list[ValidatedStatement]:
         """
-        Walk the body of a Conf or Block, match each child against the
-        schema, and return a list of ValidatedStatements.
+        Walk the body of a Conf or Block, match each child statement against
+        the schema, and return a list of ValidatedStatements.
 
-        Schema entries can be:
-          StatementDef / Multiple(StatementDef) — matched by keyword
-          Keyword(Arg(...))                      — each child statement whose
-              keyword matches Arg.name is parsed as a single-value statement
-          ExclusiveOf(StatementDef, ...)         — at most one may appear
+        Every entry in a Context is a StatementDef (or a Multiple /
+        ExclusiveOf / Deprecated wrapper around one). Presence is always
+        implicit — if the keyword appears the statement is validated, if not
+        the field stays at its default in the domain object.
         """
-        # Build lookup maps
         unique_map:   dict[str, StatementDef]               = {}
         multiple_map: dict[str, tuple[StatementDef, str]]   = {}
-        kw_map:       dict[str, Any]                        = {}  # sentinel → spec
         excl_groups:  list[tuple[int, dict[str, StatementDef]]] = []
 
         for i, entry in enumerate(schema.statements):
-            # Keyword / Optional(Keyword) entries at context level
-            if isinstance(entry, (Keyword, Optional)):
-                inner = entry.inner if isinstance(entry, Optional) else entry
-                if isinstance(inner, Keyword):
-                    sentinel = self._arg_name(inner.inner)
-                    kw_map[sentinel] = entry
-                continue
-
             if isinstance(entry, ExclusiveOf):
-                group = {}
-                for opt in entry.options:
-                    if isinstance(opt, StatementDef):
-                        group[opt.keyword] = opt
+                group = {opt.keyword: opt for opt in entry.options
+                         if isinstance(opt, StatementDef)}
                 excl_groups.append((i, group))
                 continue
 
@@ -253,10 +277,7 @@ class SemanticVisitor:
             inner   = child.inner if negated else child
 
             if not isinstance(inner, Statement):
-                self._err(
-                    f"Expected a statement, got {type(inner).__name__}",
-                    child,
-                )
+                self._err(f"Expected a statement, got {type(inner).__name__}", child)
                 continue
 
             keyword = self._peek_keyword(inner)
@@ -269,38 +290,13 @@ class SemanticVisitor:
                 if (isinstance(entry, Deprecated)
                         and hasattr(entry.inner, "keyword")
                         and entry.inner.keyword == keyword):
-                    self._err(
-                        f"'{keyword}' is deprecated",
-                        inner, severity=Severity.WARNING,
-                    )
+                    self._err(f"'{keyword}' is deprecated",
+                              inner, severity=Severity.WARNING)
                     break
 
-            # Match against Keyword entries (context-level key/value pairs)
-            if keyword in kw_map:
-                spec   = kw_map[keyword]
-                tokens = list(inner.values)[1:]   # drop keyword token
-                inner_spec = spec.inner if isinstance(spec, Optional) else spec
-                # inner_spec is Keyword(Arg(...))
-                arg = inner_spec.inner if isinstance(inner_spec, Keyword) else inner_spec
-                param, _ = self._resolve_arg(arg, tokens, inner) if tokens else (None, [])
-                if param is None:
-                    param = ValidatedParam(
-                        name=keyword.replace("-", "_"),
-                        value=None, type_name="absent",
-                    )
-                vs = ValidatedStatement(
-                    keyword=keyword,
-                    params=[param] if param else [],
-                    negated=negated,
-                    raw=inner,
-                )
-                results.append(vs)
-                continue
-
-            # Match against StatementDef entries
+            # Resolve which StatementDef matches
             sdef     = None
             group_id = None
-            is_multi = False
 
             if keyword in unique_map:
                 sdef = unique_map[keyword]
@@ -311,7 +307,6 @@ class SemanticVisitor:
 
             elif keyword in multiple_map:
                 sdef, _attr = multiple_map[keyword]
-                is_multi = True
 
             else:
                 for gid, group in excl_groups:
@@ -323,14 +318,15 @@ class SemanticVisitor:
             if sdef is None:
                 sev = Severity.ERROR if self._strict else Severity.WARNING
                 self._err(f"Unknown keyword '{keyword}'", inner, severity=sev)
-                vs = ValidatedStatement(keyword=keyword, negated=negated, raw=inner)
-                results.append(vs)
+                results.append(ValidatedStatement(
+                    keyword=keyword, negated=negated, raw=inner,
+                ))
                 continue
 
             if group_id is not None:
                 if group_id in seen_exclusive:
                     self._err(
-                        f"Only one exclusive option allowed, "
+                        f"Only one of the exclusive options is allowed, "
                         f"already saw '{seen_exclusive[group_id]}', "
                         f"got '{keyword}'",
                         inner,
@@ -338,8 +334,7 @@ class SemanticVisitor:
                     continue
                 seen_exclusive[group_id] = keyword
 
-            vs = self._visit_statement(inner, sdef, negated=negated)
-            results.append(vs)
+            results.append(self._visit_statement(inner, sdef, negated=negated))
 
         return results
 

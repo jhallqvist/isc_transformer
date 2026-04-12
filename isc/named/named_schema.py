@@ -1,546 +1,331 @@
 """
-isc.named.named_schema
-~~~~~~~~~~~~~~~~~~~~~~
-Complete DSL schema for ISC BIND named.conf.
+isc.named.nodes
+~~~~~~~~~~~~~~~
+Domain dataclasses produced by the TransformationVisitor.
 
-Each top-level statement is defined as a StatementDef using the DSL
-types from isc.named.dsl. The root NAMED_CONF Context wires them
-together with their cardinality.
+These are the final typed output of the pipeline:
 
-Coverage
---------
-  options         global server options (common subset)
-  acl             address-match list alias
-  key             TSIG/TKEY shared secret
-  zone            zone declaration
-  view            view declaration
-  controls        RNDC control channels (inet, unix)
-  logging         channels and categories
-  server          per-remote-server settings
-  tls             TLS context (BIND 9.18+)
-  http            HTTP endpoint (BIND 9.18+)
-  statistics-channels  HTTP statistics endpoint
-  trusted-keys    explicitly trusted DNSSEC keys (deprecated)
-  managed-keys    RFC 5011 managed keys (deprecated)
-  trust-anchors   RFC 5011 trust anchors
-  dnssec-policy   DNSSEC signing policy
-  include         include another file
+  named.conf str
+    → Lexer → tokens
+    → Parser → Generic AST (Conf/Statement/Block/Negated)
+    → SemanticVisitor → ValidatedConf (typed_ast.py)
+    → TransformationVisitor → NamedConf (this file)
 
-Extending
----------
-Add a StatementDef and wire it into NAMED_CONF (or a sub-Context).
-The visitor requires no changes — it dispatches purely on DSL structure.
+All fields default to None or empty list so the TransformationVisitor
+can instantiate nodes with only the fields it resolved.
 """
 
 from __future__ import annotations
 
-from isc.named.dsl import (
-    Arg, Keyword, Optional, Negatable, Wildcard, Deprecated,
-    Multiple, OneOf, ExclusiveOf, Variadic, ListOf, Context,
-    StatementDef,
-    IpAddressType, IpPrefixType, BooleanType, Integer, FixedPoint,
-    Percentage, Size, StringType, EnumType, Duration, RrTypeList,
-    TsigAlgorithm, Base64, Unlimited,
-    AclReference, KeyReference, TlsReference, ViewReference,
+import ipaddress
+from dataclasses import dataclass, field
+from typing import Union
+
+from isc.named.typed_ast import (
+    AddressMatchElement,
+    TsigAlgorithmValue,
+    AclRef, KeyRef,
 )
 
-
-__all__ = ["NAMED_CONF"]
-
-
-# ---------------------------------------------------------------------------
-# Shared constructs
-# ---------------------------------------------------------------------------
-
-# Recursive address-match element.
-# Defined before use — Python resolves the name at walk time, not definition
-# time, so the forward reference in ListOf(...) is safe.
-ADDRESS_MATCH_ELEMENT = Negatable(Arg("value",
-    IpAddressType(),
-    IpPrefixType(),
-    AclReference(),
-    KeyReference(),
-    ListOf(None),   # recursive — patched below
-))
-
-# Patch the recursive ListOf now that ADDRESS_MATCH_ELEMENT is defined
-from dataclasses import replace as _replace
-_recursive_list = ListOf(ADDRESS_MATCH_ELEMENT)
-ADDRESS_MATCH_ELEMENT = Negatable(Arg("value",
-    IpAddressType(),
-    IpPrefixType(),
-    AclReference(),
-    KeyReference(),
-    _recursive_list,
-))
-
-_ACL_LIST  = Arg("elements", ListOf(ADDRESS_MATCH_ELEMENT))
-_ALLOW_ARG = lambda name: Keyword(Arg(name, ListOf(ADDRESS_MATCH_ELEMENT)))
-
-_CLASS_ARG = Optional(Arg("zone_class",
-    EnumType("IN", "CHAOS", "HESIOD", "ANY")))
-
-_NOTIFY_VALUE = EnumType(
-    "yes", "no", "explicit", "master-only", "primary-only")
-
-_TRANSFER_FORMAT = EnumType("one-answer", "many-answers")
-
-_CHECK_NAMES_ACTION = EnumType("fail", "warn", "ignore")
-
-
-# ---------------------------------------------------------------------------
-# ACL
-# ---------------------------------------------------------------------------
-
-ACL_STMT = StatementDef(
-    "acl",
-    Arg("name", StringType()),
-    _ACL_LIST,
-)
-
-
-# ---------------------------------------------------------------------------
-# Key
-# ---------------------------------------------------------------------------
-
-KEY_STMT = StatementDef(
-    "key",
-    Arg("name", StringType()),
-    Context(
-        Keyword(Arg("algorithm", TsigAlgorithm())),
-        Keyword(Arg("secret",    Base64())),
-    ),
-)
-
-
-# ---------------------------------------------------------------------------
-# Controls
-# ---------------------------------------------------------------------------
-
-INET_STMT = StatementDef(
-    "inet",
-    Arg("address",    IpAddressType()),
-    Optional(Keyword(Arg("port",      Integer(min=1, max=65535)))),
-    Keyword(Arg("allow",              ListOf(ADDRESS_MATCH_ELEMENT))),
-    Optional(Keyword(Arg("keys",      ListOf(KeyReference())))),
-    Optional(Keyword(Arg("read-only", BooleanType()))),
-)
-
-UNIX_STMT = StatementDef(
-    "unix",
-    Arg("path",  StringType()),
-    Optional(Keyword(Arg("perm",      Integer()))),
-    Optional(Keyword(Arg("owner",     Integer()))),
-    Optional(Keyword(Arg("group",     Integer()))),
-    Optional(Keyword(Arg("keys",      ListOf(KeyReference())))),
-    Optional(Keyword(Arg("read-only", BooleanType()))),
-)
-
-CONTROLS_STMT = StatementDef(
-    "controls",
-    Arg("controls", ListOf(OneOf(INET_STMT, UNIX_STMT))),
-)
-
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-NULL_DEST_STMT = StatementDef(
-    "null",  attr="destination",
-)
-
-STDERR_DEST_STMT = StatementDef(
-    "stderr",  attr="destination",
-)
-
-FILE_DEST_STMT = StatementDef(
-    "file",
-    Arg("path", StringType()),
-    Optional(Keyword(Arg("versions", OneOf(Integer(min=0), Unlimited())))),
-    Optional(Keyword(Arg("size",     OneOf(Size(),         Unlimited())))),
-    Optional(Keyword(Arg("suffix",   EnumType("increment", "timestamp")))),
-    attr="destination",
-)
-
-SYSLOG_DEST_STMT = StatementDef(
-    "syslog",
-    Optional(Arg("facility", EnumType(
-        "kern",   "user",   "mail",   "daemon", "auth",
-        "syslog", "lpr",    "news",   "uucp",   "cron",
-        "local0", "local1", "local2", "local3",
-        "local4", "local5", "local6", "local7",
-    ))),
-    attr="destination",
-)
-
-CHANNEL_STMT = StatementDef(
-    "channel",
-    Arg("name", StringType()),
-    Context(
-        ExclusiveOf(
-            NULL_DEST_STMT,
-            STDERR_DEST_STMT,
-            FILE_DEST_STMT,
-            SYSLOG_DEST_STMT,
-        ),
-        Keyword(Arg("severity", OneOf(
-            EnumType("critical", "error", "warning",
-                     "notice",   "info",  "dynamic"),
-            Keyword(Arg("debug", Integer(min=0))),
-        ))),
-        Keyword(Arg("print-time", OneOf(
-            BooleanType(),
-            EnumType("iso8601", "iso8601-utc", "local"),
-        ))),
-        Keyword(Arg("print-severity",  BooleanType())),
-        Keyword(Arg("print-category",  BooleanType())),
-        Keyword(Arg("buffered",        BooleanType())),
-    ),
-    attr="channels",
-)
-
-CATEGORY_STMT = StatementDef(
-    "category",
-    Arg("name", EnumType(
-        "client",          "cname",         "config",
-        "database",        "default",       "delegation-only",
-        "dispatch",        "dnssec",        "dnstap",
-        "edns-disabled",   "general",       "lame-servers",
-        "network",         "notify",        "nsid",
-        "queries",         "query-errors",  "rate-limit",
-        "resolver",        "rpz",           "security",
-        "serve-stale",     "spill",         "trust-anchor-telemetry",
-        "unmatched",       "update",        "update-security",
-        "xfer-in",         "xfer-out",      "zoneload",
-    )),
-    Arg("channels", ListOf(StringType())),
-    attr="categories",
-)
-
-LOGGING_STMT = StatementDef(
-    "logging",
-    Context(
-        Multiple(CHANNEL_STMT),
-        Multiple(CATEGORY_STMT),
-    ),
-)
-
-
-# ---------------------------------------------------------------------------
-# Server
-# ---------------------------------------------------------------------------
-
-SERVER_STMT = StatementDef(
-    "server",
-    Arg("address", IpAddressType()),
-    Context(
-        Keyword(Arg("bogus",           BooleanType())),
-        Keyword(Arg("edns",            BooleanType())),
-        Keyword(Arg("edns-udp-size",   Integer(min=512, max=4096))),
-        Keyword(Arg("max-udp-size",    Integer(min=512, max=4096))),
-        Keyword(Arg("tcp-only",        BooleanType())),
-        Keyword(Arg("transfers",       Integer(min=0))),
-        Keyword(Arg("transfer-format", _TRANSFER_FORMAT)),
-        Keyword(Arg("keys",            ListOf(KeyReference()))),
-        Keyword(Arg("request-expire",  BooleanType())),
-        Keyword(Arg("request-ixfr",    BooleanType())),
-    ),
-)
-
-
-# ---------------------------------------------------------------------------
-# Zone
-# ---------------------------------------------------------------------------
-
-_ZONE_TYPE = EnumType(
-    "primary", "secondary", "master", "slave",
-    "hint", "stub", "forward", "redirect",
-    "delegation-only", "in-view",
-)
-
-_UPDATE_POLICY_MATCHTYPE = EnumType(
-    "6to4-self",    "external",        "krb5-self",
-    "krb5-selfsub", "krb5-subdomain",  "krb5-subdomain-self-rhs",
-    "ms-self",      "ms-selfsub",      "ms-subdomain",
-    "ms-subdomain-self-rhs", "name",   "self",
-    "selfsub",      "selfwild",        "subdomain",
-    "tcp-self",     "wildcard",        "zonesub",
-)
-
-UPDATE_POLICY_RULE_STMT = StatementDef(
-    "grant",
-    Arg("action",    EnumType("grant", "deny")),
-    Arg("identity",  StringType()),
-    Arg("matchtype", _UPDATE_POLICY_MATCHTYPE),
-    Optional(Arg("name",    StringType())),
-    Arg("rrtypes",   Variadic(StringType())),
-)
-
-ZONE_STMT = StatementDef(
-    "zone",
-    Arg("name",       StringType()),
-    _CLASS_ARG,
-    Context(
-        Keyword(Arg("type",           _ZONE_TYPE)),
-        Keyword(Arg("file",           StringType())),
-        Keyword(Arg("masters",        ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("primaries",      ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("allow-query",    ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("allow-transfer", ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("allow-update",   ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("allow-notify",   ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("also-notify",    ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("forwarders",     ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("forward",        EnumType("only", "first"))),
-        Keyword(Arg("notify",         _NOTIFY_VALUE)),
-        Keyword(Arg("key-directory",  StringType())),
-        Keyword(Arg("auto-dnssec",    EnumType("allow", "maintain", "off"))),
-        Keyword(Arg("dnssec-policy",  StringType())),
-        Keyword(Arg("inline-signing", BooleanType())),
-        Keyword(Arg("update-policy",  OneOf(
-            EnumType("local"),
-            ListOf(UPDATE_POLICY_RULE_STMT),
-        ))),
-        Keyword(Arg("check-names",    _CHECK_NAMES_ACTION)),
-        Keyword(Arg("zone-statistics",BooleanType())),
-        Keyword(Arg("serial-update-method", EnumType(
-            "increment", "unixtime", "date"))),
-    ),
-)
-
-
-# ---------------------------------------------------------------------------
-# View
-# ---------------------------------------------------------------------------
-
-_VIEW_CLASS_ARG = Optional(Arg("view_class",
-    EnumType("IN", "CHAOS", "HESIOD", "ANY")))
-
-VIEW_STMT = StatementDef(
-    "view",
-    Arg("name",       StringType()),
-    _VIEW_CLASS_ARG,
-    Context(
-        Keyword(Arg("match-clients",       ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("match-destinations",  ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("match-recursive-only",BooleanType())),
-        Multiple(ZONE_STMT, attr="zones"),
-        Multiple(ACL_STMT,  attr="acls"),
-        Multiple(KEY_STMT,  attr="keys"),
-    ),
-)
-
-
-# ---------------------------------------------------------------------------
-# Options
-# ---------------------------------------------------------------------------
-
-OPTIONS_STMT = StatementDef(
-    "options",
-    Context(
-        Keyword(Arg("directory",             StringType())),
-        Keyword(Arg("named-xfer",            StringType())),
-        Keyword(Arg("pid-file",              StringType())),
-        Keyword(Arg("dump-file",             StringType())),
-        Keyword(Arg("statistics-file",       StringType())),
-        Keyword(Arg("memstatistics-file",    StringType())),
-        Keyword(Arg("session-keyfile",       StringType())),
-        Keyword(Arg("bindkeys-file",         StringType())),
-        Keyword(Arg("managed-keys-directory",StringType())),
-        Keyword(Arg("listen-on",   ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("listen-on-v6",ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("forwarders",  ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("forward",     EnumType("only", "first"))),
-        Keyword(Arg("recursion",   BooleanType())),
-        Keyword(Arg("allow-query",       ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("allow-query-cache", ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("allow-recursion",   ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("allow-transfer",    ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("blackhole",         ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("notify",            _NOTIFY_VALUE)),
-        Keyword(Arg("also-notify",       ListOf(ADDRESS_MATCH_ELEMENT))),
-        Keyword(Arg("dnssec-validation", EnumType("yes", "no", "auto"))),
-        Deprecated(StatementDef("dnssec-enable",
-            Keyword(Arg("dnssec-enable", BooleanType())))),
-        Keyword(Arg("version",           StringType())),
-        Keyword(Arg("hostname",          StringType())),
-        Keyword(Arg("server-id",         StringType())),
-        Keyword(Arg("port",              Integer(min=1, max=65535))),
-        Keyword(Arg("max-cache-size",    OneOf(Size(), Unlimited()))),
-        Keyword(Arg("max-cache-ttl",     Duration())),
-        Keyword(Arg("max-ncache-ttl",    Duration())),
-        Keyword(Arg("transfers-in",      Integer(min=0))),
-        Keyword(Arg("transfers-out",     Integer(min=0))),
-        Keyword(Arg("transfer-format",   _TRANSFER_FORMAT)),
-        Keyword(Arg("auth-nxdomain",     BooleanType())),
-        Keyword(Arg("empty-zones-enable",BooleanType())),
-        Keyword(Arg("minimal-responses", OneOf(
-            BooleanType(),
-            EnumType("no-auth", "no-auth-recursive"),
-        ))),
-        Keyword(Arg("minimal-any",           BooleanType())),
-        Keyword(Arg("tcp-clients",           Integer(min=0))),
-        Keyword(Arg("recursive-clients",     Integer(min=0))),
-        Keyword(Arg("resolver-query-timeout",Integer(min=0))),
-        Keyword(Arg("interface-interval",    Integer(min=0))),
-        Keyword(Arg("check-names",           _CHECK_NAMES_ACTION)),
-    ),
-)
-
-
-# ---------------------------------------------------------------------------
-# TLS (BIND 9.18+)
-# ---------------------------------------------------------------------------
-
-TLS_STMT = StatementDef(
-    "tls",
-    Arg("name", StringType()),
-    Context(
-        Keyword(Arg("key-file",                StringType())),
-        Keyword(Arg("cert-file",               StringType())),
-        Keyword(Arg("ca-file",                 StringType())),
-        Keyword(Arg("dhparam-file",            StringType())),
-        Keyword(Arg("remote-hostname",         StringType())),
-        Keyword(Arg("protocols",               ListOf(StringType()))),
-        Keyword(Arg("ciphers",                 StringType())),
-        Keyword(Arg("prefer-server-ciphers",   BooleanType())),
-        Keyword(Arg("session-tickets",         BooleanType())),
-    ),
-)
-
-
-# ---------------------------------------------------------------------------
-# HTTP (BIND 9.18+)
-# ---------------------------------------------------------------------------
-
-HTTP_STMT = StatementDef(
-    "http",
-    Arg("name", StringType()),
-    Context(
-        Keyword(Arg("endpoints",              ListOf(StringType()))),
-        Keyword(Arg("listener-clients",       Integer(min=0))),
-        Keyword(Arg("streams-per-connection", Integer(min=0))),
-    ),
-)
-
-
-# ---------------------------------------------------------------------------
-# Statistics channels
-# ---------------------------------------------------------------------------
-
-STATISTICS_CHANNELS_STMT = StatementDef(
-    "statistics-channels",
-    Arg("statistics_channels", ListOf(
-        StatementDef(
-            "inet",
-            Arg("address", IpAddressType()),
-            Optional(Keyword(Arg("port",  Integer(min=1, max=65535)))),
-            Optional(Keyword(Arg("allow", ListOf(ADDRESS_MATCH_ELEMENT)))),
-        ),
-    )),
-)
-
-
-# ---------------------------------------------------------------------------
-# Trust anchors / trusted-keys / managed-keys
-# ---------------------------------------------------------------------------
-
-_TRUST_ENTRY = StatementDef(
-    "",    # no keyword — entries are purely positional
-    Arg("domain",      StringType()),
-    Arg("_sep",        EnumType(".")),
-    Arg("anchor_type", EnumType(
-        "initial-key", "static-key",
-        "initial-ds",  "static-ds",
-    )),
-    Arg("flags",     Integer(min=0, max=65535)),
-    Arg("protocol",  Integer(min=0, max=255)),
-    Arg("algorithm", Integer(min=0, max=255)),
-    Arg("key_data",  Base64()),
-)
-
-_TRUST_BLOCK = ListOf(_TRUST_ENTRY)
-
-TRUSTED_KEYS_STMT = Deprecated(StatementDef(
-    "trusted-keys",
-    Arg("trusted_keys", _TRUST_BLOCK),
-))
-
-MANAGED_KEYS_STMT = Deprecated(StatementDef(
-    "managed-keys",
-    Arg("managed_keys", _TRUST_BLOCK),
-))
-
-TRUST_ANCHORS_STMT = StatementDef(
-    "trust-anchors",
-    Arg("trust_anchors", _TRUST_BLOCK),
-)
-
-
-# ---------------------------------------------------------------------------
-# DNSSEC policy
-# ---------------------------------------------------------------------------
-
-_DNSSEC_KEY_ROLE_STMT = lambda role: StatementDef(
-    role,
-    Optional(Keyword(Arg("lifetime",  OneOf(Duration(), Unlimited())))),
-    Optional(Keyword(Arg("algorithm", StringType()))),
-)
-
-DNSSEC_POLICY_STMT = StatementDef(
-    "dnssec-policy",
-    Arg("name", StringType()),
-    Context(
-        Keyword(Arg("dnskey-ttl",               Duration())),
-        Keyword(Arg("keys",                     ListOf(
-            OneOf(
-                _DNSSEC_KEY_ROLE_STMT("csk"),
-                _DNSSEC_KEY_ROLE_STMT("ksk"),
-                _DNSSEC_KEY_ROLE_STMT("zsk"),
-            ),
-        ))),
-        Keyword(Arg("max-zone-ttl",             Duration())),
-        Keyword(Arg("parent-ds-ttl",            Duration())),
-        Keyword(Arg("publish-safety",           Duration())),
-        Keyword(Arg("retire-safety",            Duration())),
-        Keyword(Arg("signatures-refresh",       Duration())),
-        Keyword(Arg("signatures-validity",      Duration())),
-        Keyword(Arg("signatures-validity-dnskey", Duration())),
-        Keyword(Arg("zone-propagation-delay",   Duration())),
-    ),
-)
-
-
-# ---------------------------------------------------------------------------
-# Include
-# ---------------------------------------------------------------------------
-
-INCLUDE_STMT = StatementDef(
-    "include",
-    Arg("path", StringType()),
-)
-
-
-# ---------------------------------------------------------------------------
-# Root schema
-# ---------------------------------------------------------------------------
-
-NAMED_CONF = Context(
-    OPTIONS_STMT,
-    Multiple(ACL_STMT),
-    Multiple(KEY_STMT),
-    Multiple(ZONE_STMT),
-    Multiple(VIEW_STMT),
-    CONTROLS_STMT,
-    LOGGING_STMT,
-    Multiple(SERVER_STMT),
-    Multiple(TLS_STMT),
-    Multiple(HTTP_STMT),
-    STATISTICS_CHANNELS_STMT,
-    TRUSTED_KEYS_STMT,
-    MANAGED_KEYS_STMT,
-    Multiple(TRUST_ANCHORS_STMT),
-    Multiple(DNSSEC_POLICY_STMT),
-    Multiple(INCLUDE_STMT),
-)
+__all__ = [
+    "AddressMatchElement",
+    "TsigAlgorithmValue",
+    "AclStatement",
+    "KeyStatement",
+    "InetChannel",
+    "UnixChannel",
+    "NullDestination",
+    "StderrDestination",
+    "FileDestination",
+    "SyslogDestination",
+    "ChannelStatement",
+    "CategoryStatement",
+    "LoggingStatement",
+    "ServerStatement",
+    "UpdatePolicyRule",
+    "ZoneStatement",
+    "ViewStatement",
+    "OptionsStatement",
+    "TlsStatement",
+    "HttpStatement",
+    "StatisticsChannel",
+    "TrustAnchorEntry",
+    "DnssecKeySpec",
+    "DnssecPolicyStatement",
+    "IncludeStatement",
+    "NamedConf",
+]
+
+
+@dataclass
+class AclStatement:
+    name:     str = ""
+    elements: list[AddressMatchElement] = field(default_factory=list)
+
+
+@dataclass
+class KeyStatement:
+    name:      str                       = ""
+    algorithm: TsigAlgorithmValue | None = None
+    secret:    str                       = ""
+
+
+@dataclass
+class InetChannel:
+    address:   Union[ipaddress.IPv4Address, ipaddress.IPv6Address, str] = None
+    port:      int  | None = None
+    allow:     list[AddressMatchElement] = field(default_factory=list)
+    keys:      list[str]                 = field(default_factory=list)
+    read_only: bool | None = None
+
+
+@dataclass
+class UnixChannel:
+    path:      str        = ""
+    perm:      int | None = None
+    owner:     int | None = None
+    group:     int | None = None
+    keys:      list[str]  = field(default_factory=list)
+    read_only: bool | None = None
+
+
+@dataclass
+class NullDestination:
+    pass
+
+
+@dataclass
+class StderrDestination:
+    pass
+
+
+@dataclass
+class FileDestination:
+    path:     str        = ""
+    versions: int | None = None
+    size:     int | None = None
+    suffix:   str | None = None
+
+
+@dataclass
+class SyslogDestination:
+    facility: str | None = None
+
+
+@dataclass
+class ChannelStatement:
+    name:           str = ""
+    destination:    Union[
+        NullDestination, StderrDestination,
+        FileDestination, SyslogDestination, None,
+    ] = None
+    severity:       object = None
+    print_time:     object = None
+    print_severity: bool | None = None
+    print_category: bool | None = None
+    buffered:       bool | None = None
+
+
+@dataclass
+class CategoryStatement:
+    name:     str       = ""
+    channels: list[str] = field(default_factory=list)
+
+
+@dataclass
+class LoggingStatement:
+    channels:   list[ChannelStatement]  = field(default_factory=list)
+    categories: list[CategoryStatement] = field(default_factory=list)
+
+
+@dataclass
+class ServerStatement:
+    address:         Union[ipaddress.IPv4Address, ipaddress.IPv6Address] = None
+    bogus:           bool | None = None
+    edns:            bool | None = None
+    edns_udp_size:   int  | None = None
+    max_udp_size:    int  | None = None
+    tcp_only:        bool | None = None
+    transfers:       int  | None = None
+    transfer_format: str  | None = None
+    keys:            list[str]   = field(default_factory=list)
+    request_expire:  bool | None = None
+    request_ixfr:    bool | None = None
+
+
+@dataclass
+class UpdatePolicyRule:
+    action:    str        = ""
+    identity:  str        = ""
+    matchtype: str        = ""
+    name:      str | None = None
+    rrtypes:   list[str]  = field(default_factory=list)
+
+
+@dataclass
+class ZoneStatement:
+    name:                 str  = ""
+    zone_class:           str | None = None
+    type:                 str | None = None
+    file:                 str | None = None
+    masters:              list[AddressMatchElement] = field(default_factory=list)
+    primaries:            list[AddressMatchElement] = field(default_factory=list)
+    allow_query:          list[AddressMatchElement] = field(default_factory=list)
+    allow_transfer:       list[AddressMatchElement] = field(default_factory=list)
+    allow_update:         list[AddressMatchElement] = field(default_factory=list)
+    allow_notify:         list[AddressMatchElement] = field(default_factory=list)
+    also_notify:          list[AddressMatchElement] = field(default_factory=list)
+    forwarders:           list[AddressMatchElement] = field(default_factory=list)
+    forward:              str | None = None
+    notify:               str | None = None
+    key_directory:        str | None = None
+    auto_dnssec:          str | None = None
+    dnssec_policy:        str | None = None
+    inline_signing:       bool | None = None
+    update_policy:        Union[str, list[UpdatePolicyRule], None] = None
+    check_names:          str | None = None
+    zone_statistics:      bool | None = None
+    serial_update_method: str | None = None
+
+
+@dataclass
+class ViewStatement:
+    name:                 str        = ""
+    view_class:           str | None = None
+    zones:                list[ZoneStatement]       = field(default_factory=list)
+    acls:                 list[AclStatement]        = field(default_factory=list)
+    keys:                 list[KeyStatement]        = field(default_factory=list)
+    match_clients:        list[AddressMatchElement] = field(default_factory=list)
+    match_destinations:   list[AddressMatchElement] = field(default_factory=list)
+    match_recursive_only: bool | None = None
+
+
+@dataclass
+class OptionsStatement:
+    directory:              str  | None = None
+    named_xfer:             str  | None = None
+    pid_file:               str  | None = None
+    dump_file:              str  | None = None
+    statistics_file:        str  | None = None
+    memstatistics_file:     str  | None = None
+    session_keyfile:        str  | None = None
+    bindkeys_file:          str  | None = None
+    managed_keys_directory: str  | None = None
+    listen_on:              list[AddressMatchElement] = field(default_factory=list)
+    listen_on_v6:           list[AddressMatchElement] = field(default_factory=list)
+    forwarders:             list[AddressMatchElement] = field(default_factory=list)
+    forward:                str  | None = None
+    recursion:              bool | None = None
+    allow_query:            list[AddressMatchElement] = field(default_factory=list)
+    allow_query_cache:      list[AddressMatchElement] = field(default_factory=list)
+    allow_recursion:        list[AddressMatchElement] = field(default_factory=list)
+    allow_transfer:         list[AddressMatchElement] = field(default_factory=list)
+    blackhole:              list[AddressMatchElement] = field(default_factory=list)
+    notify:                 str  | None = None
+    also_notify:            list[AddressMatchElement] = field(default_factory=list)
+    dnssec_validation:      str  | None = None
+    version:                str  | None = None
+    hostname:               str  | None = None
+    server_id:              str  | None = None
+    port:                   int  | None = None
+    max_cache_size:         int  | None = None
+    max_cache_ttl:          int  | None = None
+    max_ncache_ttl:         int  | None = None
+    transfers_in:           int  | None = None
+    transfers_out:          int  | None = None
+    transfer_format:        str  | None = None
+    auth_nxdomain:          bool | None = None
+    empty_zones_enable:     bool | None = None
+    minimal_responses:      object     = None
+    minimal_any:            bool | None = None
+    tcp_clients:            int  | None = None
+    recursive_clients:      int  | None = None
+    resolver_query_timeout: int  | None = None
+    interface_interval:     int  | None = None
+    check_names:            str  | None = None
+
+
+@dataclass
+class TlsStatement:
+    name:                  str        = ""
+    key_file:              str | None = None
+    cert_file:             str | None = None
+    ca_file:               str | None = None
+    dhparam_file:          str | None = None
+    remote_hostname:       str | None = None
+    protocols:             list[str]  = field(default_factory=list)
+    ciphers:               str | None = None
+    prefer_server_ciphers: bool | None = None
+    session_tickets:       bool | None = None
+
+
+@dataclass
+class HttpStatement:
+    name:                   str        = ""
+    endpoints:              list[str]  = field(default_factory=list)
+    listener_clients:       int | None = None
+    streams_per_connection: int | None = None
+
+
+@dataclass
+class StatisticsChannel:
+    address: Union[ipaddress.IPv4Address, ipaddress.IPv6Address, str] = None
+    port:    int | None = None
+    allow:   list[AddressMatchElement] = field(default_factory=list)
+
+
+@dataclass
+class TrustAnchorEntry:
+    domain:      str = ""
+    anchor_type: str = ""
+    flags:       int = 0
+    protocol:    int = 0
+    algorithm:   int = 0
+    key_data:    str = ""
+
+
+@dataclass
+class DnssecKeySpec:
+    role:      str        = ""
+    lifetime:  int | None = None
+    algorithm: str | None = None
+
+
+@dataclass
+class DnssecPolicyStatement:
+    name:                       str  = ""
+    dnskey_ttl:                 int  | None = None
+    keys:                       list[DnssecKeySpec] = field(default_factory=list)
+    max_zone_ttl:               int  | None = None
+    parent_ds_ttl:              int  | None = None
+    publish_safety:             int  | None = None
+    retire_safety:              int  | None = None
+    signatures_refresh:         int  | None = None
+    signatures_validity:        int  | None = None
+    signatures_validity_dnskey: int  | None = None
+    zone_propagation_delay:     int  | None = None
+
+
+@dataclass
+class IncludeStatement:
+    path: str = ""
+
+
+@dataclass
+class NamedConf:
+    options:             OptionsStatement | None               = None
+    acls:                list[AclStatement]                    = field(default_factory=list)
+    keys:                list[KeyStatement]                    = field(default_factory=list)
+    zones:               list[ZoneStatement]                   = field(default_factory=list)
+    views:               list[ViewStatement]                   = field(default_factory=list)
+    controls:            list[Union[InetChannel, UnixChannel]] = field(default_factory=list)
+    logging:             LoggingStatement | None               = None
+    servers:             list[ServerStatement]                 = field(default_factory=list)
+    tls:                 list[TlsStatement]                    = field(default_factory=list)
+    http:                list[HttpStatement]                   = field(default_factory=list)
+    statistics_channels: list[StatisticsChannel]               = field(default_factory=list)
+    trusted_keys:        list[TrustAnchorEntry]                = field(default_factory=list)
+    managed_keys:        list[TrustAnchorEntry]                = field(default_factory=list)
+    trust_anchors:       list[TrustAnchorEntry]                = field(default_factory=list)
+    dnssec_policies:     list[DnssecPolicyStatement]           = field(default_factory=list)
+    includes:            list[IncludeStatement]                = field(default_factory=list)
