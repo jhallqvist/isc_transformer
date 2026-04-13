@@ -88,6 +88,30 @@ class StringType:
 
 
 @dataclass(frozen=True)
+class NameType:
+    """
+    An ISC object name — the identifier used for acl, key, zone, view etc.
+    Accepts Word, String, and Number tokens since BIND allows any token type
+    as an object name (e.g. 'key 1 { ... }' is valid).
+    Coerces to str.
+    """
+
+
+@dataclass(frozen=True)
+class IscClassType:
+    """
+    An ISC DNS class identifier.
+    Accepts the full names and their standard abbreviations,
+    case-insensitively:
+      IN  / INET  — Internet (default)
+      CH  / CHAOS — Chaosnet
+      HS  / HESIOD
+      ANY
+    Coerces to the canonical uppercase short form (IN, CH, HS, ANY).
+    """
+
+
+@dataclass(frozen=True)
 class EnumType:
     """One of a fixed set of bare word values."""
     values: tuple[str, ...]

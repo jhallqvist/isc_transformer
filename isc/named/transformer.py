@@ -101,8 +101,21 @@ class TransformationVisitor:
         conf = NamedConf()
         for stmt in validated.body:
             self._dispatch(stmt, conf)
+        # Collect all reference objects from the entire validated tree
+        self._walk_refs(validated)
         self._resolve_references()
         return conf
+
+    def _walk_refs(self, validated: ValidatedConf) -> None:
+        """Walk every ValidatedParam in the tree and register ref objects."""
+        for stmt in validated.body:
+            self._walk_stmt_refs(stmt)
+
+    def _walk_stmt_refs(self, stmt: ValidatedStatement) -> None:
+        for param in stmt.params:
+            self._collect_refs(param.value)
+        for child in stmt.body:
+            self._walk_stmt_refs(child)
 
     def _dispatch(self, stmt: ValidatedStatement, conf: NamedConf) -> None:
         kw = stmt.keyword
@@ -468,6 +481,7 @@ class TransformationVisitor:
     # ------------------------------------------------------------------
 
     def _resolve_references(self) -> None:
+        """Verify all collected references against the definitions registry."""
         for ref, kind in self._pending_refs:
             if kind == "acl" and ref.name in _BUILTIN_ACLS:
                 continue
@@ -476,6 +490,25 @@ class TransformationVisitor:
                     f"{kind} '{ref.name}' is referenced but never defined",
                     keyword=kind,
                 )
+
+    def _collect_refs(self, value: Any) -> None:
+        """
+        Recursively walk a coerced value and register any reference objects
+        into _pending_refs for deferred resolution.
+        """
+        if isinstance(value, AclRef):
+            self._pending_refs.append((value, "acl"))
+        elif isinstance(value, KeyRef):
+            self._pending_refs.append((value, "key"))
+        elif isinstance(value, TlsRef):
+            self._pending_refs.append((value, "tls"))
+        elif isinstance(value, ViewRef):
+            self._pending_refs.append((value, "view"))
+        elif isinstance(value, list):
+            for item in value:
+                self._collect_refs(item)
+        elif isinstance(value, AddressMatchElement):
+            self._collect_refs(value.value)
 
     # ------------------------------------------------------------------
     # Helpers

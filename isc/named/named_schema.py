@@ -22,7 +22,8 @@ from isc.named.dsl import (
     Multiple, OneOf, ExclusiveOf, Variadic, ListOf, Context,
     StatementDef,
     IpAddressType, IpPrefixType, BooleanType, Integer,
-    Size, StringType, EnumType, Duration, TsigAlgorithm, Base64, Unlimited,
+    Size, StringType, NameType, IscClassType, EnumType,
+    Duration, TsigAlgorithm, Base64, Unlimited,
     AclReference, KeyReference,
 )
 
@@ -51,7 +52,7 @@ ADDRESS_MATCH_ELEMENT = Negatable(Arg("value",
 
 _ACL_LIST          = Arg("elements", ListOf(ADDRESS_MATCH_ELEMENT))
 _ALLOW             = lambda name: StatementDef(name, Arg("elements", ListOf(ADDRESS_MATCH_ELEMENT)))
-_CLASS_ARG         = Optional(Arg("zone_class", EnumType("IN", "CHAOS", "HESIOD", "ANY")))
+_CLASS_ARG         = Optional(Arg("zone_class", IscClassType()))
 _NOTIFY_VALUE      = EnumType("yes", "no", "explicit", "master-only", "primary-only")
 _TRANSFER_FORMAT   = EnumType("one-answer", "many-answers")
 _CHECK_NAMES       = EnumType("fail", "warn", "ignore")
@@ -66,7 +67,7 @@ _ZONE_TYPE         = EnumType(
 # ---------------------------------------------------------------------------
 
 ACL_STMT = StatementDef("acl",
-    Arg("name", StringType()),
+    Arg("name", NameType()),
     _ACL_LIST,
 )
 
@@ -76,7 +77,7 @@ ACL_STMT = StatementDef("acl",
 # ---------------------------------------------------------------------------
 
 KEY_STMT = StatementDef("key",
-    Arg("name", StringType()),
+    Arg("name", NameType()),
     Context(
         StatementDef("algorithm", Arg("algorithm", TsigAlgorithm())),
         StatementDef("secret",    Arg("secret",    Base64())),
@@ -136,7 +137,7 @@ SYSLOG_DEST_STMT = StatementDef("syslog",
 )
 
 CHANNEL_STMT = StatementDef("channel",
-    Arg("name", StringType()),
+    Arg("name", NameType()),
     Context(
         ExclusiveOf(
             NULL_DEST_STMT,
@@ -335,7 +336,7 @@ OPTIONS_STMT = StatementDef("options",
 # ---------------------------------------------------------------------------
 
 TLS_STMT = StatementDef("tls",
-    Arg("name", StringType()),
+    Arg("name", NameType()),
     Context(
         StatementDef("key-file",              Arg("key-file",              StringType())),
         StatementDef("cert-file",             Arg("cert-file",             StringType())),
@@ -355,7 +356,7 @@ TLS_STMT = StatementDef("tls",
 # ---------------------------------------------------------------------------
 
 HTTP_STMT = StatementDef("http",
-    Arg("name", StringType()),
+    Arg("name", NameType()),
     Context(
         StatementDef("endpoints",              Arg("endpoints",              ListOf(StringType()))),
         StatementDef("listener-clients",       Arg("listener-clients",       Integer(min=0))),
@@ -411,7 +412,7 @@ def _key_role(role: str) -> StatementDef:
     )
 
 DNSSEC_POLICY_STMT = StatementDef("dnssec-policy",
-    Arg("name", StringType()),
+    Arg("name", NameType()),
     Context(
         StatementDef("dnskey-ttl",   Arg("dnskey-ttl",   Duration())),
         StatementDef("keys",         Arg("keys",         ListOf(OneOf(

@@ -54,7 +54,8 @@ from isc.named.parser import Conf, Statement, Block, Negated
 
 from isc.named.dsl import (
     IpAddressType, IpPrefixType, BooleanType, Integer, FixedPoint,
-    Percentage, Size, StringType, EnumType, Duration, RrTypeList,
+    Percentage, Size, StringType, NameType, IscClassType,
+    EnumType, Duration, RrTypeList,
     TsigAlgorithm, Base64, Unlimited,
     AclReference, KeyReference, TlsReference, ViewReference,
     Arg, Keyword, Optional, Negatable, Wildcard, Deprecated,
@@ -656,6 +657,13 @@ class SemanticVisitor:
         if isinstance(inner, Negatable):
             inner = inner.inner
 
+        # Nested address-match block: !{ key "abc"; } or { 10.0.0.0/8; }
+        # The node is a Block — recurse into _resolve_list_of with the same spec
+        if isinstance(node, Block):
+            nested = self._resolve_list_of(node, spec, parent)
+            elem = AddressMatchElement(negated=negated, value=nested)
+            return elem
+
         if isinstance(inner, StatementDef):
             if not isinstance(node, Statement):
                 self._err(f"Expected a statement", node)
@@ -686,7 +694,13 @@ class SemanticVisitor:
                     coerced, err = self._coerce(node, type_spec)
                     if err is None:
                         return coerced
-            self._err(f"Could not resolve '{inner.name}'", node)
+            type_names = " or ".join(type(t).__name__ for t in inner.types)
+            got = getattr(node, 'raw', repr(node))
+            self._err(
+                f"Could not match '{inner.name}' — "
+                f"expected {type_names}, got {got!r}",
+                node,
+            )
             return None
 
         # Bare type spec
@@ -756,6 +770,10 @@ class SemanticVisitor:
             return self._coerce_duration(node)
         if isinstance(type_spec, StringType):
             return self._coerce_string(node)
+        if isinstance(type_spec, NameType):
+            return self._coerce_name(node)
+        if isinstance(type_spec, IscClassType):
+            return self._coerce_isc_class(node)
         if isinstance(type_spec, EnumType):
             return self._coerce_enum(node, type_spec)
         if isinstance(type_spec, RrTypeList):
@@ -881,12 +899,82 @@ class SemanticVisitor:
             return node.value, None
         return None, f"expected string, got {type(node).__name__}"
 
+    def _coerce_name(self, node: Any) -> tuple[Any, str | None]:
+        """
+        Coerce an ISC object name. BIND accepts any token type — Word,
+        String, or Number — as an identifier for acl, key, zone, view etc.
+        """
+        if isinstance(node, (Word, String)):
+            return node.value, None
+        if isinstance(node, Number):
+            return node.raw, None   # preserve raw form e.g. "1", "0xff"
+        return None, f"expected a name (word, string or number), got {type(node).__name__}"
+
+    # ISC DNS class canonical mapping — case-insensitive, full names and abbreviations
+    _ISC_CLASS_MAP = {
+        "in":     "IN",  "inet":   "IN",
+        "ch":     "CH",  "chaos":  "CH",
+        "hs":     "HS",  "hesiod": "HS",
+        "any":    "ANY",
+    }
+
+    def _coerce_isc_class(self, node: Any) -> tuple[Any, str | None]:
+        """
+        Coerce an ISC DNS class identifier case-insensitively.
+        Accepts full names (CHAOS, HESIOD) and abbreviations (CH, HS).
+        Returns the canonical short form: IN, CH, HS, or ANY.
+        """
+        if not isinstance(node, (Word, String)):
+            return None, f"expected a DNS class, got {type(node).__name__}"
+        canonical = self._ISC_CLASS_MAP.get(node.value.lower())
+        if canonical is None:
+            valid = "IN, CH (CHAOS), HS (HESIOD), ANY"
+            return None, f"{node.value!r} is not a valid DNS class ({valid})"
+        return canonical, None
+
     def _coerce_enum(self, node: Any, spec: EnumType) -> tuple[Any, str | None]:
+        """
+        Coerce an enum value. Comparison is case-insensitive — BIND
+        accepts e.g. 'Master', 'MASTER', 'master' interchangeably.
+        Returns the value in the canonical case defined in the schema.
+        """
         if not isinstance(node, (Word, String)):
             return None, f"expected one of {spec.values}"
-        if node.value not in spec.values:
-            return None, f"{node.value!r} not in {spec.values}"
-        return node.value, None
+        lower = node.value.lower()
+        for v in spec.values:
+            if v.lower() == lower:
+                return v, None
+        return None, f"{node.value!r} is not one of {spec.values}"
+
+    def _coerce_base64(self, node: Any) -> tuple[Any, str | None]:
+        """
+        Coerce a Base64 encoded value.
+
+        BIND is permissive about Base64 secrets:
+          - Quoted strings: whitespace is stripped, missing '=' padding
+            is added automatically.
+          - Unquoted words: accepted as-is if they form valid Base64
+            after padding is added (BIND allows omitting trailing '=').
+
+        The stored value is the normalised Base64 string (no whitespace,
+        correctly padded) so downstream consumers can decode it reliably.
+        """
+        if isinstance(node, String):
+            raw = node.value.replace(" ", "").replace("\n", "").replace("\t", "")
+        elif isinstance(node, Word):
+            raw = node.value
+        else:
+            return None, f"expected a Base64 string, got {type(node).__name__}"
+
+        # Add padding if missing — Base64 length must be a multiple of 4
+        padding = (4 - len(raw) % 4) % 4
+        padded = raw + "=" * padding
+
+        try:
+            _base64.b64decode(padded, validate=True)
+            return padded, None
+        except Exception:
+            return None, f"{node.raw!r} is not valid Base64"
 
     def _coerce_rr_type_list(self, node: Any) -> tuple[Any, str | None]:
         if not isinstance(node, (Word, String)):
@@ -911,16 +999,6 @@ class SemanticVisitor:
             return None, f"{node.value!r} is not a valid TSIG algorithm"
         return TsigAlgorithmValue(base=value, truncation=None), None
 
-    def _coerce_base64(self, node: Any) -> tuple[Any, str | None]:
-        if not isinstance(node, String):
-            return None, f"expected quoted Base64 string, got {type(node).__name__}"
-        stripped = node.value.replace(" ", "").replace("\n", "")
-        try:
-            _base64.b64decode(stripped, validate=True)
-            return stripped, None
-        except Exception:
-            return None, f"{node.value!r} is not valid Base64"
-
     def _coerce_unlimited(self, node: Any) -> tuple[Any, str | None]:
         if isinstance(node, Word) and node.value == "unlimited":
             return None, None  # None signals no limit
@@ -930,10 +1008,18 @@ class SemanticVisitor:
         self, node: Any, kind: str
     ) -> tuple[Any, str | None]:
         """
-        Coerce a reference. Accepts two forms:
-          - Bare token:           "myacl", "mykey"
-          - Statement with key:  key "mykey"
-        Returns the appropriate Ref object (AclRef, KeyRef, etc).
+        Coerce a reference to a named definition.
+
+        Accepts two forms:
+          - Bare token (Word, String, or Number): "myacl", "mykey", 1
+          - Statement with sentinel: key "mykey", key 1
+
+        BIND allows any token type as an object name, so key references
+        like 'key 1' (where 1 is a Number) are valid.
+
+        Returns the appropriate Ref object. Cross-reference resolution
+        (checking that the name is actually defined) is deferred to the
+        TransformationVisitor.
         """
         _ref_classes = {
             "acl": AclRef, "key": KeyRef,
@@ -941,19 +1027,33 @@ class SemanticVisitor:
         }
         cls = _ref_classes[kind]
 
+        # Bare token — any token type is a valid name
         if isinstance(node, (Word, String)):
             return cls(node.value), None
+        if isinstance(node, Number):
+            return cls(node.raw), None
 
         if isinstance(node, Statement):
             values = list(node.values)
+            # Sentinel form: key <name>  where name may be Word, String or Number
             if (len(values) == 2
                     and isinstance(values[0], Word)
-                    and values[0].value == kind
-                    and isinstance(values[1], (Word, String))):
-                return cls(values[1].value), None
-            if len(values) == 1 and isinstance(values[0], (Word, String)):
-                return cls(values[0].value), None
-            return None, f"expected {kind} reference, got {node!r}"
+                    and values[0].value == kind):
+                name_tok = values[1]
+                if isinstance(name_tok, (Word, String)):
+                    return cls(name_tok.value), None
+                if isinstance(name_tok, Number):
+                    return cls(name_tok.raw), None
+            # Single-value statement: the statement itself is just a name
+            if len(values) == 1:
+                tok = values[0]
+                if isinstance(tok, (Word, String)):
+                    return cls(tok.value), None
+                if isinstance(tok, Number):
+                    return cls(tok.raw), None
+            return None, (
+                f"expected {kind} name (word, string or number), got {node!r}"
+            )
 
         return None, f"expected {kind} reference, got {type(node).__name__}"
 
